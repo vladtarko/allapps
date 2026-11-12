@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
+from pathlib import Path
 
 from rich.markup import escape
 from textual import work
@@ -23,6 +25,19 @@ from discovery import (
     uninstall_hint,
     uninstall_targets,
 )
+
+APP_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = APP_DIR / "config.json"
+DEFAULT_THEME = "dracula"
+DEFAULT_SORT = "name"
+
+
+def _load_config() -> dict:
+    try:
+        data = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _short(text: str, limit: int = 100) -> str:
@@ -153,19 +168,43 @@ class AllAppsApp(App):
         Binding("u", "uninstall", "Uninstall"),
         Binding("p", "toggle_packages", "Packages"),
         Binding("s", "cycle_sort", "Sort"),
+        Binding("t", "change_theme", "Theme"),
         Binding("r", "refresh", "Refresh"),
         Binding("escape", "clear_search", "Clear search", show=False),
     ]
 
     def __init__(self) -> None:
         super().__init__()
+        self.config = _load_config()
+        stored_theme = self.config.get("theme")
+        theme = (
+            stored_theme
+            if isinstance(stored_theme, str)
+            and stored_theme in self.available_themes
+            else DEFAULT_THEME
+        )
+        stored_sort = self.config.get("sort")
+        sort_mode = (
+            stored_sort
+            if isinstance(stored_sort, str)
+            and stored_sort in self.SORT_MODES
+            else DEFAULT_SORT
+        )
+        self.theme = theme
+        self.sort_mode = sort_mode
+        self.config["theme"] = theme
+        self.config["sort"] = sort_mode
+        self._config_dirty = (
+            not CONFIG_PATH.exists()
+            or stored_theme != theme
+            or stored_sort != sort_mode
+        )
         self.all_apps: list[AppInfo] = []
         self.apps_by_key: dict[str, AppInfo] = {}
         self.selected_app: AppInfo | None = None
         self.selected_keys: set[str] = set()
         self.row_keys: list[str] = []
         self.include_packages = False
-        self.sort_mode = "name"
         self._restore_index = 0
         self._steam_restore_index = 0
 
@@ -185,6 +224,10 @@ class AllAppsApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        self.theme_changed_signal.subscribe(self, self._on_theme_changed)
+        if self._config_dirty:
+            self._save_config()
+            self._config_dirty = False
         table = self.query_one(DataTable)
         table.add_column("Sel", width=3, key="sel")
         table.add_column("Name", width=28)
@@ -320,6 +363,26 @@ class AllAppsApp(App):
 
     # ------------------------------------------------------------------ actions ---
 
+    def _save_config(self) -> None:
+        try:
+            CONFIG_PATH.write_text(
+                json.dumps(self.config, indent=2) + "\n",
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            self.notify(
+                f"Could not save {CONFIG_PATH.name}: {exc}",
+                severity="warning",
+                timeout=5,
+            )
+
+    def _on_theme_changed(self, theme) -> None:
+        self.config["theme"] = theme.name
+        self._save_config()
+
+    def action_change_theme(self) -> None:
+        self.search_themes()
+
     def action_focus_search(self) -> None:
         self.query_one("#search", Input).focus()
 
@@ -338,6 +401,8 @@ class AllAppsApp(App):
         anchor = self.selected_app.uid if self.selected_app else None
         index = self.SORT_MODES.index(self.sort_mode)
         self.sort_mode = self.SORT_MODES[(index + 1) % len(self.SORT_MODES)]
+        self.config["sort"] = self.sort_mode
+        self._save_config()
         self._update_subtitle()
         self.refresh_table()
         if anchor:
